@@ -60,8 +60,12 @@ router.get('/', function(req, res, next) {
  *         description: Forbidden - Token expired or invalid
  */
 router.get('/user-details', authenticateToken, async (req, res) => {
-  const { email, username, phone, _id, isEmailVerified } = req.user;
-  let userdetails = await User.findOne({email});
+  const { email, username, phone, id, isEmailVerified } = req.user;
+  console.log(email,id);
+  let userid = id;
+  let userdetails = await User.findOne({_id: userid});
+
+  console.log(userdetails);
   // Send the user profile data
   return res.status(200).json({
     status: 'success',
