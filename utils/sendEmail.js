@@ -2,8 +2,9 @@ const nodemailer = require("nodemailer");
 require("dotenv").config();
 
 const sendEmail = async (email, username, otp) => {
+
+  console.log(email, username, otp);
   try {
-    console.log("Starting send email");
     const transporter = nodemailer.createTransport({
       host: process.env.SENDGRID_SERVER,
       port: process.env.SENDGRID_PORTS,
@@ -11,7 +12,7 @@ const sendEmail = async (email, username, otp) => {
       auth: {
         user: process.env.SENDGRID_USERNAME,
         pass: process.env.SENDGRID_API_KEY,
-      },
+      },  
     });
 
     //This Message Will go On Email of the User
@@ -45,7 +46,6 @@ const sendEmail = async (email, username, otp) => {
       subject: "API Testing", // Subject line.
       html: message, // Plaintext body.
     };
-    console.log("Sending Emails");
     const info = await transporter.sendMail(mailOptions);
     console.log("Email sent:", info.response);
   } catch (err) {

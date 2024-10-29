@@ -1,7 +1,7 @@
 var express = require('express');
 var router = express.Router();
 const User = require('../models/users');
-const {authenticateToken} = require('../middleware/auth'); // Path to the middleware
+const {authenticateToken,authenticateGuestToken} = require('../middleware/auth'); // Path to the middleware
 
 /* GET users listing. */
 router.get('/', function(req, res, next) {
@@ -14,7 +14,7 @@ router.get('/', function(req, res, next) {
  * /users/user-details:
  *   get:
  *     summary: Retrieve user details
- *     description: Get the authenticated user's details such as email, username, phone, and email verification status.
+ *     description: Get the authenticated user's details such as email, username, phone, and email verification status. For guest users, only limited details are returned.
  *     security:
  *       - bearerAuth: []
  *     tags:
@@ -59,29 +59,58 @@ router.get('/', function(req, res, next) {
  *       403:
  *         description: Forbidden - Token expired or invalid
  */
-router.get('/user-details', authenticateToken, async (req, res) => {
-  const { email, username, phone, id, isEmailVerified } = req.user;
-  console.log(email,id);
-  let userid = id;
-  let userdetails = await User.findOne({_id: userid});
+router.get('/user-details', async (req, res, next) => {
+  try {
+    // First, try to authenticate the user with the main token
+    await authenticateToken(req, res, async (err) => {
+      if (err) {
+        console.log('Not a User Checking in Guest users');
 
-  console.log(userdetails);
-  // Send the user profile data
-  return res.status(200).json({
-    status: 'success',
-    data: {
-      user: {
-        email:userdetails.email,
-        username: userdetails.username,
-        phone:userdetails.phone,
-        id: userdetails._id,
-        referralCode: userdetails.referralCode,
-        referredBy: userdetails.referredBy,
-        isEmailVerified:userdetails.isEmailVerified,
-      },
-    },
-    timestamp: new Date().toISOString(),
-  });
+        await authenticateGuestToken(req, res, async (guestErr) => {
+          if (guestErr) {
+            // If both authentication methods fail, respond with Unauthorized
+            return res.status(401).json({ message: "Unauthorized access" });
+          }
+          
+          // For guest users, send limited data
+          return res.status(200).json({
+            status: 'success',
+            data: {
+              user: {
+                id: req.guestUser.id, // Assuming guest user has a different ID property
+                username: 'Unknown',
+              },
+            },
+            timestamp: new Date().toISOString(),
+          });
+        });
+      } else {
+        // For authenticated users, proceed with full user data retrieval
+        const { email, username, phone, id, isEmailVerified } = req.user;
+        const userdetails = await User.findOne({ _id: id });
+
+        // Full user details for authenticated users
+        return res.status(200).json({
+          status: 'success',
+          data: {
+            user: {
+              email: userdetails.email,
+              username: userdetails.username,
+              phone: userdetails.phone,
+              id: userdetails._id,
+              referralCode: userdetails.referralCode,
+              referredBy: userdetails.referredBy,
+              isEmailVerified: userdetails.isEmailVerified,
+            },
+          },
+          timestamp: new Date().toISOString(),
+        });
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 /**
  * @swagger

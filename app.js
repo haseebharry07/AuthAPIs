@@ -64,7 +64,7 @@ const swaggerOptions = {
   },
   apis: ['./routes/*.js'], // Points to the API route files
 };
-
+require('./jobs/removeExpiredGuests');
 // Initialize swagger-jsdoc
 const swaggerDocs = swaggerJsdoc(swaggerOptions);
 console.log(swaggerDocs);

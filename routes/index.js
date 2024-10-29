@@ -1,4 +1,5 @@
 var express = require("express");
+const { body, validationResult } = require('express-validator');
 const jwt = require("jsonwebtoken");
 const User = require("../models/users");
 const GuestUser = require("../models/guestUser");
@@ -13,6 +14,7 @@ const {
   getClientIP,
   authenticateGuestToken,
   emailverifier,
+  authenticateToken
 } = require("../middleware/auth");
 const bcrypt = require("bcrypt");
 require("dotenv").config();
@@ -74,7 +76,13 @@ const JWT_SECRET = process.env.JWT_SECRET;
  *       500:
  *         description: Internal server error or email sending failure
  */
-router.post("/register", async (req, res) => {
+// Registration route with validation
+router.post('/register', 
+  body('email').isEmail().withMessage('Please enter a valid email address.'),
+  body('username').notEmpty().withMessage('Username is required.'),
+  body('phone').notEmpty().withMessage('Phone number is required.'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters long.'),
+  async (req, res) => {
   const { email, username, phone, password, referralCode } = req.body;
   // checking user exists or not
   console.log(email, username, password);
@@ -117,15 +125,7 @@ router.post("/register", async (req, res) => {
   });
   await user.save();
   console.log(JWT_SECRET);
-  // Generate JWT token for email verification
-  const token = jwt.sign(
-    { id: user._id, email: user.email },
-    JWT_SECRET,
-    { expiresIn: "1h" } // Token expires in 1 hour
-  );
-  // console.log(token);
   await sendEmail(email, username, otp);
-  console.log(`http://localhost:3500/api/verify-email?token=${token}`);
   res
     .status(201)
     .json({ message: "Please Check Your Email(Register Successfully)" });
@@ -187,7 +187,8 @@ router.post("/register", async (req, res) => {
 router.post("/verify-email", emailverifier, async (req, res) => {
   const { email, otp } = req.body;
   console.log(email, otp, "Starting Verify");
-  // Find user by email and check OTP
+
+  // Find user by email
   const user = await User.findOne({ email });
   console.log(user);
   if (!user) {
@@ -197,14 +198,34 @@ router.post("/verify-email", emailverifier, async (req, res) => {
   // Check if OTP matches and is within the expiration time
   if (user.otpCode === otp && user.otpExpiration > Date.now()) {
     try {
-      // OTP is valid, mark the email as verified
-      await User.updateOne(
-        { email },
-        { isEmailVerified: true, otpCode: null, otpExpiration: null }
-      );
-      return res.status(200).json({ message: "Email verified successfully" });
+      if (user.isGuest) {
+        // For Guest
+        await User.updateOne(
+          { email },
+          {
+            isEmailVerified: true,
+            isGuest: false, 
+            tokenExpiration: null,
+            otpCode: null,
+            otpExpiration: null,
+          }
+        );
+        return res.status(200).json({ message: "Guest user converted to registered user and email verified successfully" });
+      } else {
+        // For Reqular User
+        await User.updateOne(
+          { email },
+          {
+            isEmailVerified: true,
+            otpCode: null,
+            otpExpiration: null,
+          }
+        );
+        return res.status(200).json({ message: "Email verified successfully" });
+      }
     } catch (e) {
-      return res.status(400).json({ message: "Email is Not verify" });
+      console.error(e);
+      return res.status(500).json({ message: "Server error while verifying email" });
     }
   }
 
@@ -293,15 +314,25 @@ router.post("/verify-email", emailverifier, async (req, res) => {
  */
 router.post("/login", loginValidation, async (req, res) => {
   const { email, password } = req.body;
-  console.log("start");
+  console.log("start",email,password);
+ 
   try {
     const user = await User.findOne({ email });
+    console.log(user);
     if (!user) {
       return res.status(400).json({ message: "Invalid email or password" });
     }
     console.log(user.isEmailVerified);
-    if (user.isEmailVerified == false) {
-      return res.status(400).json({ message: "Email is not Verified" });
+    // let msg = 'Login successful'; 
+    if (!user.isEmailVerified) {
+        const otp = generateOTP();
+        const expirationTime = Date.now() + 10 * 60 * 1000; // OTP valid for 10 minutes
+        user.otpCode = otp;
+        user.otpExpiration = expirationTime;
+        await user.save();
+      await sendEmail(email, user.username, otp);
+    //  msg = 'Email is not Verified....  To Verify Email OTP send to the user email please check thanks';
+      return res.status(400).json({ message: "Email is not Verified....  To Verify Email OTP send to the user email please check thanks" });
     }
     if (user.isDeleted == true) {
       return res.status(400).json({ message: "user is not exists" });
@@ -319,16 +350,6 @@ router.post("/login", loginValidation, async (req, res) => {
     // Save login log to MongoDB
     const userIP = getClientIP(req);
     console.log(userIP);
-    // const userIP = req.ip; // Get user's IP address
-    // const userLoginLog = new UserLoginLog({
-    //   userId: user._id,
-    //   ip: userIP,
-    //   token,
-    //   createdAt: new Date(),
-    //   updatedAt: new Date(),
-    // });
-    // await userLoginLog.save();
-    // Store the session in the database
     await userSession.create({
       userId: user._id,
       token: token,
@@ -338,7 +359,7 @@ router.post("/login", loginValidation, async (req, res) => {
     });
     return res.status(200).json({
       status: "success",
-      message: "Login Successful",
+      message: 'Login successful',
       data: {
         user: {
           email: user.email,
@@ -431,11 +452,11 @@ router.post("/logout", async (req, res) => {
  * @swagger
  * /api/guest-login:
  *   post:
- *     summary: Login as a guest
- *     description: Allows a user to log in as a guest and receive a temporary JWT token.
+ *     summary: Guest Login
+ *     description: Allows a user to log in as a guest and receive a temporary token with a 24-hour expiration.
  *     responses:
  *       200:
- *         description: Successful guest login
+ *         description: Guest login successful
  *         content:
  *           application/json:
  *             schema:
@@ -444,6 +465,9 @@ router.post("/logout", async (req, res) => {
  *                 status:
  *                   type: string
  *                   example: success
+ *                 message:
+ *                   type: string
+ *                   example: Guest login successful
  *                 data:
  *                   type: object
  *                   properties:
@@ -452,113 +476,25 @@ router.post("/logout", async (req, res) => {
  *                       properties:
  *                         id:
  *                           type: string
+ *                           description: Unique ID of the guest user.
  *                         isGuest:
  *                           type: boolean
- *                     token:
+ *                           description: Indicator that the user is a guest.
+ *                         createdAt:
+ *                           type: string
+ *                           format: date-time
+ *                           description: Creation timestamp of the guest user.
+ *                         tokenExpiration:
+ *                           type: string
+ *                           format: date-time
+ *                           description: Token expiration timestamp.
+ *                     accessToken:
  *                       type: string
- *       500:
- *         description: Server error
- */
-// Guest Login API
-router.post("/guest-login", async (req, res) => {
-  try {
-    // Generate a unique guest ID (could be UUID, random string, or MongoDB ObjectId)
-    const guestID = new mongoose.Types.ObjectId();
-
-    // Create a temporary guest user
-    const guestUser = {
-      id: guestID,
-      isGuest: true,
-      createdAt: new Date(),
-    };
-
-    // Save guest session in DB (optional, depends on your design)
-    const newSession = GuestSession({
-      guestID: guestUser.id,
-      createdAt: guestUser.createdAt,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24-hour expiration
-    });
-    await newSession.save();
-
-    // Generate JWT token valid for 24 hours
-    const token = jwt.sign(
-      { id: guestUser.id, isGuest: true },
-      process.env.GUEST_JWT_SECRET,
-      { expiresIn: "24h" }
-    );
-
-    // Return guest token to the client
-    return res.status(200).json({
-      status: "success",
-      message: "Guest login successful",
-      data: {
-        guestUser: {
-          id: guestUser.id,
-          isGuest: guestUser.isGuest,
-        },
-        token,
-      },
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Server error" });
-  }
-});
-router.post(
-  "/convert-to-user",
-  authenticateGuestToken,
-  loginValidation,
-  async (req, res) => {
-    const { email, password } = req.body;
-    console.log("start", email, password);
-    console.log("Guest ID:", req.guest?.id);
-    try {
-      // Check if email already exists
-      const existingUser = await User.findOne({ email });
-      console.log(existingUser);
-      if (existingUser) {
-        return res.status(400).json({ message: "Email already registered" });
-      }
-
-      // Convert guest to registered user
-      const newUser = new GuestUser({
-        email,
-        password: await bcrypt.hash(password, 10), // Hash password
-        createdAt: new Date(),
-      });
-      console.log(newUser);
-      console.log("Guest ID:", req.guest?.id);
-      await newUser.save();
-
-      // Optionally, delete guest session from the database
-
-      return res.status(200).json({ message: "User registration successful" });
-    } catch (error) {
-      return res.status(500).json({ message: "Server error" });
-    }
-  }
-);
-
-/**
- * @swagger
- * /api/guest-logout:
- *   post:
- *     summary: Guest logout
- *     description: Logs out a guest user by removing or invalidating the guest session.
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Guest logged out successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 message:
+ *                       description: Access token for the guest user.
+ *                 timestamp:
  *                   type: string
- *                   example: Guest logged out successfully
+ *                   format: date-time
+ *                   description: The current timestamp.
  *       500:
  *         description: Server error
  *         content:
@@ -570,14 +506,369 @@ router.post(
  *                   type: string
  *                   example: Server error
  */
-router.post("/guest-logout", authenticateGuestToken, async (req, res) => {
+// Guest Login API
+router.post("/guest-login", async (req, res) => {
   try {
-    // Remove guest session from database or invalidate session
-    await GuestSession.findOneAndDelete({ guestID: req.guest.id });
+    // Generate a unique guest ID
+    const guestID = new mongoose.Types.ObjectId();
 
-    return res.status(200).json({ message: "Guest logged out successfully" });
+    // Generate a JWT token for the guest user with a 24-hour expiration
+    const token = jwt.sign(
+      { id: guestID, isGuest: true },
+      process.env.GUEST_JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    // Set the expiration date for the token
+    const tokenExpiration = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+    // Create a new guest user in the User collection
+    const guestUser = new User({
+      guestUserId: guestID,
+      isGuest: true,
+      createdAt: new Date(),
+      accessToken: token,
+      tokenExpiration: tokenExpiration,
+    });
+
+    // Save the guest user to the database
+    await guestUser.save();
+
+    // Return the guest user's data and token to the client
+    return res.status(200).json({
+      status: "success",
+      message: "Guest login successful",
+      data: {
+        guestUser: {
+          id: guestUser.guestUserId,
+          isGuest: guestUser.isGuest,
+          createdAt: guestUser.createdAt,
+          tokenExpiration: guestUser.tokenExpiration,
+        },
+        accessToken:token,
+      },
+      timestamp: new Date().toISOString(),
+    });
   } catch (error) {
+    console.error(error);
     return res.status(500).json({ message: "Server error" });
   }
 });
+/**
+ * @swagger
+ * /api/update-guest-user:
+ *   post:
+ *     summary: Update Guest User to Registered User
+ *     description: Convert a guest user into a registered user by providing email, username, and password. An OTP will be sent to the provided email for verification.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 description: The email address to register with.
+ *                 example: user@example.com
+ *               username:
+ *                 type: string
+ *                 description: The username for the registered user.
+ *                 example: user123
+ *               password:
+ *                 type: string
+ *                 format: password
+ *                 description: The password for the registered user.
+ *                 example: password123
+ *     parameters:
+ *       - in: header
+ *         name: Authorization
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Bearer token for the guest user (format: Bearer <token>).
+ *     responses:
+ *       200:
+ *         description: OTP sent to email for verification.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: success
+ *                 message:
+ *                   type: string
+ *                   example: OTP sent to email for verification.
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                   description: The current timestamp.
+ *       400:
+ *         description: Bad request - Email or Username already exists
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: Email Already Exists or UserName Already Exists
+ *       404:
+ *         description: Guest user not found or already registered.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: Guest user not found or already registered.
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                   example: Server error
+ */
+router.post("/update-guest-user", authenticateGuestToken,async (req, res) => {
+  const { email, username, password } = req.body;
+  const token = req.headers.authorization.split(" ")[1]; // Token from "Bearer <token>"
+
+  try {
+    // Decode the token to get guestUserId
+    const decoded = jwt.verify(token, process.env.GUEST_JWT_SECRET);
+    const guestUserId = decoded.id;
+
+    // Find the guest user by their guestUserId
+    const guestUser = await User.findOne({ guestUserId, isGuest: true });
+    if (!guestUser) {
+      return res.status(404).json({ message: "Guest user not found or already registered." });
+    }
+    const existingUser = await User.findOne({email});
+    if(existingUser){
+      return res.status(400).json({ message: "Email Already Exists" });
+    }
+    const existingUsername = await User.findOne({username});
+    if(existingUsername){
+      return res.status(400).json({ message: "UserName Already Exists" });
+    }
+    // Check if the referral code exists, if provided
+  // let referredBy = null;
+  // if (referralCode) {
+  //   const referrer = await User.findOne({ referralCode });
+  //   if (!referrer) {
+  //     return res.status(400).json({ message: "Invalid referral code" });
+  //   }
+  //   referredBy = referralCode;
+  // }
+  // const userReferralCode = generateReferralCode();
+    const otpCode = generateOTP();
+    const otpExpiration = new Date(Date.now() + 10 * 60 * 1000);
+    guestUser.otpCode = otpCode;
+    guestUser.otpExpiration = otpExpiration;
+    guestUser.username = username;
+    guestUser.email = email;
+    guestUser.password = await bcrypt.hash(password, 10);
+    guestUser.isGuest = false;
+    // guestUser.referralCode = userReferralCode;
+    // guestUser.referredBy ='null';
+
+
+
+
+    await guestUser.save();
+
+    // Send OTP to the user's email
+    await sendEmail(email,username,otpCode);
+
+    return res.status(200).json({
+      status: "success",
+      message: "OTP sent to email for verification.",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+/**
+ * @swagger
+ * /api/update-email:
+ *   post:
+ *     summary: Update user's email address
+ *     description: Allows a logged-in user to update their email address after verification.
+ *     security:
+ *       - bearerAuth: []
+ *     tags:
+ *       - Users
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               newEmail:
+ *                 type: string
+ *                 example: "newemail@example.com"
+ *     responses:
+ *       200:
+ *         description: OTP sent to the new email address
+ *       401:
+ *         description: Unauthorized - Token is missing or invalid
+ *       400:
+ *         description: Bad Request - Invalid or missing data
+ */
+
+router.post('/update-email', authenticateToken, async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+
+    if (!newEmail) {
+      return res.status(400).json({ message: 'Please provide a new email address.' });
+    }
+
+    // Retrieve logged-in user data from token
+    const { email, id, isEmailVerified } = req.user;
+ const user = await User.findOne({_id: id});
+    // Check if the user’s current email is verified
+    if (!user.isEmailVerified) {
+      return res.status(400).json({ message: 'Email verification is required before updating the email address.' });
+    }
+    const checkNewuser = await User.findOne({newEmail});
+    console.log(checkNewuser);
+    // if(checkNewuser.email){
+    //   return res.status(400).json({message:'Email Already Exists'});
+    // }
+
+    // Generate an OTP and send it to the new email
+    const otp = generateOTP();
+    const otpSent = await sendEmail(newEmail,user.username, otp);
+
+    // Save the OTP and new email to the user’s record for verification (temporary storage, e.g., in MongoDB)
+    await User.updateOne(
+      { _id: id },
+      { $set: { pendingNewEmail: newEmail, emailUpdateOtp: otp } }
+    );
+
+    return res.status(200).json({ message: 'OTP sent to the new email address for verification.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error.' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/verify-email-update:
+ *   post:
+ *     summary: Verify OTP for email update
+ *     description: Confirms OTP sent to the new email and updates the email in the user's record.
+ *     security:
+ *       - bearerAuth: []
+ *     tags:
+ *       - Users
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               otp:
+ *                 type: string
+ *                 example: "123456"
+ *     responses:
+ *       200:
+ *         description: Email address updated successfully
+ *       400:
+ *         description: Invalid OTP or request data
+ */
+
+router.post('/verify-email-update', authenticateToken, async (req, res) => {
+  try {
+    const { otp,newEmail } = req.body;
+    const { id } = req.user;
+console.log(id);
+    // Retrieve user by ID and check if there's a pending email update
+    const user = await User.findOne({ _id: id });
+    console.log('user:',user);
+    if (!user || user.emailUpdateOtp !== otp || !user.pendingNewEmail === newEmail) {
+      return res.status(400).json({ message: 'Invalid OTP or Email Address' });
+    }
+
+    // Update the user’s email with the new email and clear OTP/pending data
+    user.email = user.pendingNewEmail;
+    user.pendingNewEmail = null;
+    user.emailUpdateOtp = null;
+    await user.save();
+
+    return res.status(200).json({ message: 'Email address updated successfully.' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error.' });
+  }
+});
+
+
+// Request password reset
+router.post('/reset-password', 
+  body('email').isEmail().withMessage('Please enter a valid email address.'),authenticateToken,
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ status: 'error', errors: errors.array() });
+    }
+
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'User not found.' });
+    }
+
+    // Generate OTP
+    const otp = generateOTP(); // Generate a 6-digit OTP
+    user.otpCode = otp;
+    user.otpExpiration = Date.now() + 10 * 60 * 1000; // 10 minutes expiry
+    await user.save();
+    await sendEmail(user.email, user.username, otp);
+    return res.status(200).json({ status: 'success', message: 'OTP sent to your email.' });
+});
+
+// Verify OTP and reset password
+router.post('/reset-password/verify', 
+  body('email').isEmail().withMessage('Please enter a valid email address.'),
+  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits long.'),
+  body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters long.'),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ status: 'error', errors: errors.array() });
+    }
+    const { email, otp, newPassword } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'User not found.' });
+    }
+    if (user.otpCode !== otp || Date.now() > user.otpExpiration) {
+      return res.status(400).json({ status: 'error', message: 'Invalid or expired OTP.' });
+    }
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword; 
+    user.otpCode = null; 
+    user.otpExpiration = null; 
+    await user.save();
+
+    return res.status(200).json({ status: 'success', message: 'Password has been reset successfully.' });
+  }
+);
+
 module.exports = router;
